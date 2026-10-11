@@ -1,20 +1,18 @@
 package com.example.videodl
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.res.ColorStateList
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.provider.MediaStore
+import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -23,7 +21,6 @@ import android.widget.*
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import java.io.File
-import java.net.URL
 import java.util.concurrent.CopyOnWriteArrayList
 
 class MainActivity : Activity() {
@@ -33,8 +30,12 @@ class MainActivity : Activity() {
     private lateinit var updateBtn: Button
     private lateinit var clearBtn: Button
     private lateinit var openBtn: Button
-    private lateinit var bar: ProgressBar
+    private lateinit var list: LinearLayout
     private lateinit var status: TextView
+
+    private class Card(val title: TextView, val bar: ProgressBar, val info: TextView, val cancel: Button) {
+        @Volatile var cancelled = false
+    }
 
     private val labels = arrayOf("۱۰۸۰ یا کمتر", "۷۲۰ یا کمتر", "۴۸۰ یا کمتر", "فقط صدا")
     private val heights = intArrayOf(1080, 720, 480, 0) // 0 = audio only
@@ -96,7 +97,7 @@ class MainActivity : Activity() {
             layoutParams = LinearLayout.LayoutParams(wrap, wrap).apply { topMargin = dp(6) }
             setOnClickListener {
                 input.setText(""); status.visibility = View.GONE
-                openBtn.visibility = View.GONE; bar.progress = 0
+                openBtn.visibility = View.GONE; list.removeAllViews()
             }
         }
         content.addView(clearBtn)
@@ -114,17 +115,18 @@ class MainActivity : Activity() {
 
         downloadBtn = styledBtn("دانلود", indigo, Color.WHITE, 20f).apply {
             (layoutParams as LinearLayout.LayoutParams).topMargin = dp(18)
-            setOnClickListener { onDownloadClicked() }
+            setOnClickListener {
+                val urls = parseUrls()
+                if (urls.isEmpty()) setStatus("لینکی پیدا نشد", 2) else startDownload(urls)
+            }
         }
         content.addView(downloadBtn)
 
-        bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
-            max = 100; progressTintList = ColorStateList.valueOf(indigo)
-        }
-        content.addView(bar, LinearLayout.LayoutParams(match, wrap).apply { topMargin = dp(12) })
+        list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        content.addView(list, LinearLayout.LayoutParams(match, wrap))
 
         status = TextView(this).apply { textSize = 16f; setPadding(dp(14), dp(12), dp(14), dp(12)); visibility = View.GONE }
-        content.addView(status, LinearLayout.LayoutParams(match, wrap).apply { topMargin = dp(8) })
+        content.addView(status, LinearLayout.LayoutParams(match, wrap).apply { topMargin = dp(12) })
 
         openBtn = styledBtn("▶  باز کردن ویدیو", green, Color.WHITE, 18f).apply {
             visibility = View.GONE; setOnClickListener { openSaved() }
@@ -176,70 +178,72 @@ class MainActivity : Activity() {
     private fun parseUrls() = input.text.toString().split(Regex("\\s+")).filter { it.startsWith("http") }
         .map { if ("instagram.com" in it) it.substringBefore("?") else it } // drop ?img_index so ALL slides are read
 
-    private fun baseRequest(url: String): YoutubeDLRequest {
-        val req = YoutubeDLRequest(url)
-        val insta = "instagram.com" in url
-        if (insta) req.addOption("--ignore-errors") else req.addOption("--no-playlist")
-        if (!insta) jsRuntimeArg()?.let { req.addOption("--js-runtimes", it) }
-        return req
-    }
-
-    private fun loadBitmap(url: String?): Bitmap? = try {
-        if (url == null) null else URL(url).openStream().use { BitmapFactory.decodeStream(it) }
-    } catch (e: Exception) { null }
-
-    // Step 1: fetch title + thumbnail of the first link, then ask for confirmation
-    private fun onDownloadClicked() {
-        val urls = parseUrls()
-        if (urls.isEmpty()) { setStatus("لینکی پیدا نشد", 2); return }
-        setBusy(true); setStatus("در حال بررسی لینک…", 0)
-        Thread {
-            var title: String? = null
-            var thumb: Bitmap? = null
-            try {
-                val info = YoutubeDL.getInstance().getInfo(baseRequest(urls[0]))
-                title = info.title
-                thumb = loadBitmap(info.thumbnail)
-            } catch (e: Exception) { /* preview is optional */ }
-            runOnUiThread { setBusy(false); status.visibility = View.GONE; showConfirm(urls, title, thumb) }
-        }.start()
-    }
-
-    private fun showConfirm(urls: List<String>, title: String?, thumb: Bitmap?) {
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; layoutDirection = View.LAYOUT_DIRECTION_RTL
-            setPadding(dp(16), dp(8), dp(16), dp(8))
+    private fun makeCard(url: String): Card {
+        val title = TextView(this).apply {
+            text = url.removePrefix("https://").removePrefix("www.")
+            textSize = 15f; setTextColor(Color.parseColor("#1E293B"))
+            maxLines = 1; ellipsize = TextUtils.TruncateAt.END
         }
-        if (thumb != null) box.addView(ImageView(this).apply {
-            setImageBitmap(thumb); scaleType = ImageView.ScaleType.FIT_CENTER
-        }, LinearLayout.LayoutParams(match, dp(200)))
-        box.addView(TextView(this).apply {
-            text = (title ?: "ویدیو") + if (urls.size > 1) "\n(و ${urls.size - 1} لینک دیگر)" else ""
-            textSize = 17f; gravity = Gravity.CENTER; setPadding(0, dp(10), 0, 0)
-        })
-        AlertDialog.Builder(this)
-            .setTitle("دانلود شود؟")
-            .setView(box)
-            .setPositiveButton("دانلود") { _, _ -> startDownload(urls) }
-            .setNegativeButton("انصراف", null)
-            .show()
+        val cancel = styledBtn("لغو", Color.parseColor("#FEE2E2"), Color.parseColor("#991B1B"), 14f).apply {
+            layoutParams = LinearLayout.LayoutParams(wrap, wrap)
+        }
+        val top = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(title, LinearLayout.LayoutParams(0, wrap, 1f))
+            addView(cancel)
+        }
+        val bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100; progressTintList = ColorStateList.valueOf(indigo)
+        }
+        val info = TextView(this).apply { text = "در صف…"; textSize = 14f; setTextColor(Color.parseColor("#475569")) }
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = rounded(Color.WHITE, Color.parseColor("#E2E8F0"))
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            addView(top)
+            addView(bar, LinearLayout.LayoutParams(match, wrap).apply { topMargin = dp(6) })
+            addView(info)
+        }
+        list.addView(card, LinearLayout.LayoutParams(match, wrap).apply { topMargin = dp(10) })
+        return Card(title, bar, info, cancel)
     }
 
-    // Step 2: the actual download
     private fun startDownload(urls: List<String>) {
         val h = heights[spinner.selectedItemPosition]
         val okExt = setOf("mp4", "mp3", "webm", "mkv", "m4a")
-        setBusy(true); bar.progress = 0; saved.clear()
-        openBtn.visibility = View.GONE
-        setStatus("در حال دانلود…", 0)
+        val sizeRe = Regex("of\\s+~?\\s*([\\d.]+\\s?[KMGT]?i?B)")
+        val js = jsRuntimeArg()
+        setBusy(true); saved.clear(); status.visibility = View.GONE
+        openBtn.visibility = View.GONE; list.removeAllViews()
+
+        val cards = urls.mapIndexed { i, url ->
+            makeCard(url).also { c ->
+                c.cancel.setOnClickListener {
+                    c.cancelled = true; c.cancel.isEnabled = false; c.info.text = "در حال لغو…"
+                    try { YoutubeDL.getInstance().destroyProcessById("dl$i") } catch (e: Exception) {}
+                }
+            }
+        }
+
         Thread {
             var ok = 0
             var lastError = ""
             urls.forEachIndexed { i, url ->
+                val card = cards[i]
+                if (card.cancelled) {
+                    runOnUiThread { card.info.text = "لغو شد"; card.cancel.visibility = View.GONE }
+                    return@forEachIndexed
+                }
+                runOnUiThread { card.info.text = "در حال شروع…" }
                 val dir = File(cacheDir, "dl").apply { deleteRecursively(); mkdirs() }
+                val insta = "instagram.com" in url
+                var err = ""
                 try {
-                    val req = baseRequest(url)
+                    val req = YoutubeDLRequest(url)
                     req.addOption("-o", "${dir.absolutePath}/%(title).60s [%(id)s].%(ext)s")
+                    if (insta) req.addOption("--ignore-errors")   // multi-slide post: skip photo slides, keep videos
+                    else req.addOption("--no-playlist")
+                    if (!insta && js != null) req.addOption("--js-runtimes", js)
                     if (h == 0) {
                         req.addOption("-x")
                         req.addOption("--audio-format", "mp3")
@@ -247,20 +251,44 @@ class MainActivity : Activity() {
                         req.addOption("-f", "bv*[height<=$h][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=$h]+ba/b[height<=$h]/b")
                         req.addOption("--merge-output-format", "mp4")
                     }
-                    YoutubeDL.getInstance().execute(req, "dl$i") { pr, _, _ ->
+                    YoutubeDL.getInstance().execute(req, "dl$i") { pr, _, line ->
                         runOnUiThread {
-                            bar.progress = pr.toInt().coerceIn(0, 100)
-                            status.text = "در حال دانلود (${i + 1} از ${urls.size})…"
+                            val pct = pr.toInt().coerceIn(0, 100)
+                            card.bar.progress = pct
+                            sizeRe.find(line)?.let { card.info.text = "$pct٪ از ${it.groupValues[1]}" }
+                            if (line.contains("Destination:"))
+                                card.title.text = line.substringAfter("Destination:").trim()
+                                    .substringAfterLast('/').substringBefore(" [")
                         }
                     }
                 } catch (e: Exception) {
-                    lastError = e.message ?: ""
+                    if (!card.cancelled) err = e.message ?: ""
+                }
+
+                if (card.cancelled) {
+                    runOnUiThread { card.info.text = "لغو شد"; card.cancel.visibility = View.GONE }
+                    return@forEachIndexed
                 }
                 // keep whatever finished, even if some slides failed
                 val files = dir.listFiles()?.filter { it.isFile && it.extension.lowercase() in okExt } ?: emptyList()
                 try {
-                    if (files.isNotEmpty()) { files.forEach { saved.add(save(it, h == 0)) }; ok++ }
-                } catch (e: Exception) { lastError = e.message ?: "" }
+                    if (files.isNotEmpty()) files.forEach { saved.add(save(it, h == 0)) }
+                } catch (e: Exception) { err = e.message ?: "" }
+
+                if (files.isNotEmpty() && saved.isNotEmpty()) {
+                    ok++
+                    runOnUiThread {
+                        card.bar.progress = 100; card.cancel.visibility = View.GONE
+                        card.info.text = "تمام شد ✓"; card.info.setTextColor(Color.parseColor("#166534"))
+                    }
+                } else {
+                    lastError = err
+                    runOnUiThread {
+                        card.cancel.visibility = View.GONE
+                        card.info.text = "ناموفق: " + friendlyError(err)
+                        card.info.setTextColor(Color.parseColor("#991B1B"))
+                    }
+                }
             }
             runOnUiThread {
                 setBusy(false)
@@ -270,8 +298,6 @@ class MainActivity : Activity() {
                     setStatus(msg + if (ok < urls.size) "\n($ok از ${urls.size} لینک)" else "", 1)
                     openBtn.text = if (h == 0) "▶  پخش فایل" else "▶  باز کردن ویدیو"
                     openBtn.visibility = View.VISIBLE
-                } else {
-                    setStatus("خطا: " + friendlyError(lastError), 2)
                 }
             }
         }.start()
