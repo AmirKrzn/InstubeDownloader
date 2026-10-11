@@ -1,7 +1,9 @@
 package com.example.videodl
 
 import android.app.Activity
+import android.content.ClipboardManager
 import android.content.ContentValues
+import android.content.Context
 import android.graphics.Color
 import android.os.Bundle
 import android.provider.MediaStore
@@ -69,20 +71,46 @@ class MainActivity : Activity() {
         downloadBtn.isEnabled = !b; updateBtn.isEnabled = !b
     }
 
+    // YouTube now needs a JS runtime. The library (0.18.1+) bundles QuickJS; find it in the native lib dir.
+    private fun jsRuntimeArg(): String? {
+        val f = File(applicationInfo.nativeLibraryDir).listFiles()
+            ?.firstOrNull { it.name.contains("qjs") || it.name.contains("quickjs") }
+        return f?.let { "quickjs:${it.absolutePath}" }
+    }
+
+    // Auto-fill the box with a copied link when the app is opened/returned to
+    private var lastClip = ""
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (!hasFocus) return
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val clip = cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString()?.trim() ?: return
+        if (clip.startsWith("http") && clip != lastClip &&
+            (input.text.isBlank() || input.text.toString() == lastClip)) {
+            input.setText(clip); lastClip = clip
+        }
+    }
+
     private fun startDownload() {
         val urls = input.text.toString().split(Regex("\\s+")).filter { it.startsWith("http") }
+            .map { if ("instagram.com" in it) it.substringBefore("?") else it } // drop ?img_index so ALL slides are read
         if (urls.isEmpty()) { status.text = "لینکی پیدا نشد"; return }
         val h = heights[spinner.selectedItemPosition]
+        val js = jsRuntimeArg()
+        val okExt = setOf("mp4", "mp3", "webm", "mkv", "m4a")
         setBusy(true); bar.progress = 0
         Thread {
             var ok = 0
             var lastError = ""
             urls.forEachIndexed { i, url ->
+                val dir = File(cacheDir, "dl").apply { deleteRecursively(); mkdirs() }
+                val insta = "instagram.com" in url
                 try {
-                    val dir = File(cacheDir, "dl").apply { deleteRecursively(); mkdirs() }
                     val req = YoutubeDLRequest(url)
-                    req.addOption("-o", "${dir.absolutePath}/%(title).80s.%(ext)s")
-                    req.addOption("--no-playlist")
+                    req.addOption("-o", "${dir.absolutePath}/%(title).60s [%(id)s].%(ext)s")
+                    if (insta) req.addOption("--ignore-errors")   // multi-slide post: skip photo slides, keep videos
+                    else req.addOption("--no-playlist")
+                    if (js != null && !insta) req.addOption("--js-runtimes", js)
                     if (h == 0) {
                         req.addOption("-x")
                         req.addOption("--audio-format", "mp3")
@@ -96,16 +124,20 @@ class MainActivity : Activity() {
                             status.text = "در حال دانلود (${i + 1} از ${urls.size})…"
                         }
                     }
-                    dir.listFiles()?.forEach { save(it, h == 0) }
-                    ok++
                 } catch (e: Exception) {
                     lastError = e.message?.take(200) ?: ""
                 }
+                // keep whatever finished, even if some slides failed
+                val files = dir.listFiles()?.filter { it.isFile && it.extension.lowercase() in okExt } ?: emptyList()
+                try {
+                    if (files.isNotEmpty()) { files.forEach { save(it, h == 0) }; ok++ }
+                } catch (e: Exception) { lastError = e.message ?: "" }
             }
             runOnUiThread {
                 setBusy(false)
+                val err = if (lastError.contains("No video formats")) "ویدیویی در این لینک پیدا نشد" else lastError
                 status.text = "تمام شد: $ok از ${urls.size}" +
-                    (if (ok < urls.size) "\nخطا: $lastError" else "\nپوشه: Movies/Downloader")
+                    (if (ok < urls.size) "\nخطا: $err" else "\nپوشه: Movies/Downloader")
             }
         }.start()
     }
